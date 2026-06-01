@@ -17,14 +17,16 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. PARAMETRIZAÇÃO E INPUTS DE ENTRADA
 # ==========================================
-TICKERS_YFINANCE = ['DIVO11.SA', 'IVVB11.SA', 'GOLD11.SA', 'BITH11.SA', 'B5P211.SA']
+TICKERS_YFINANCE = ['DIVO11.SA', 'WRLD11.SA', 'GOLD11.SA', 'BITH11.SA']
 PESOS_MAXIMOS = {
     'DIVO11.SA': 0.40,
-    'IVVB11.SA': 0.40,
+    'WRLD11.SA': 0.40,
     'GOLD11.SA': 0.40,
-    'BITH11.SA': 0.40,
-    'B5P211.SA': 0.40
+    'BITH11.SA': 0.40
 }
+
+# Métrica de Otimização Escolhida. Opções: 'SHARPE', 'SORTINO', 'RISK_PARITY', 'ENTROPIA'
+METRICA_OTIMIZACAO = 'RISK_PARITY'
 
 RISK_FREE_RATE = 0.105  # Selic reference 10.5%
 NUM_PORTFOLIOS = 20000
@@ -110,12 +112,13 @@ class PortfolioStats:
 # 4. OTIMIZAÇÃO (HÍBRIDA)
 # ==========================================
 class Optimizer:
-    def __init__(self, tickers, mean_returns, cov_matrix, max_weights):
+    def __init__(self, tickers, mean_returns, cov_matrix, max_weights, log_returns):
         self.tickers = tickers
         self.mean_returns = mean_returns
         self.cov_matrix = cov_matrix
         self.max_weights = max_weights
         self.num_assets = len(tickers)
+        self.log_returns = log_returns
         
     def calc_portfolio_perf(self, weights):
         ret = np.sum(self.mean_returns * weights)
@@ -123,14 +126,13 @@ class Optimizer:
         sharpe = (ret - RISK_FREE_RATE) / vol
         return ret, vol, sharpe
 
-    def run_monte_carlo(self, num_simulations):
-        print(f"Executando Monte Carlo ({num_simulations} iterações)...")
+    def run_monte_carlo(self, num_simulations, metrica='SHARPE'):
+        print(f"Executando Monte Carlo ({num_simulations} iterações para {metrica})...")
         results = np.zeros((3, num_simulations))
         weights_record = []
         
         bounds_arr = np.array([self.max_weights.get(t, 1.0) for t in self.tickers])
         
-        # Abordagem vetorizada Dirichlet e rejeição para respeitar bounds
         batch_size = num_simulations * 20
         valid_weights = []
         while len(valid_weights) < num_simulations:
@@ -143,23 +145,71 @@ class Optimizer:
         weights_record = valid_weights
         
         for i in range(num_simulations):
-            ret, vol, sharpe = self.calc_portfolio_perf(valid_weights[i])
+            w = valid_weights[i]
+            ret, vol, sharpe = self.calc_portfolio_perf(w)
             results[0,i] = ret
             results[1,i] = vol
-            results[2,i] = sharpe
+            
+            # Cor da nuvem baseada na métrica
+            if metrica == 'SHARPE':
+                val = sharpe
+            elif metrica == 'SORTINO':
+                val = -self.neg_sortino(w)
+            elif metrica == 'RISK_PARITY':
+                val = -self.risk_parity_objective(w) # Negativo pois queremos minimizar (cores quentes = melhor)
+            elif metrica == 'ENTROPIA':
+                val = -self.neg_shannon_entropy(w) # Entropia positiva
+            else:
+                val = sharpe
+                
+            results[2,i] = val
             
         return results, weights_record
 
-    def run_scipy_solver(self):
-        print("Executando Solver Numérico...")
-        def neg_sharpe(weights):
-            return -self.calc_portfolio_perf(weights)[2]
+    def neg_sortino(self, weights):
+        ret = np.sum(self.mean_returns * weights)
+        port_returns = self.log_returns.dot(weights)
+        downside_returns = port_returns[port_returns < 0]
+        if len(downside_returns) == 0:
+            return -np.inf # Risco downside zero = Sortino infinito
+        downside_dev = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(252)
+        if downside_dev == 0:
+            return -np.inf
+        return -(ret - RISK_FREE_RATE) / downside_dev
+
+    def risk_parity_objective(self, weights):
+        vol = np.sqrt(np.dot(weights.T, np.dot(self.cov_matrix, weights)))
+        mrc = np.dot(self.cov_matrix, weights) / vol
+        rc = weights * mrc
+        target_rc = vol / self.num_assets
+        return np.sum((rc - target_rc)**2)
+
+    def neg_shannon_entropy(self, weights):
+        entropy = 0
+        for w in weights:
+            if w > 1e-6:
+                entropy -= w * np.log(w)
+        return -entropy
+
+    def run_scipy_solver(self, metrica):
+        print(f"Executando Solver Numérico ({metrica})...")
 
         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
         bounds = tuple((0, self.max_weights.get(t, 1.0)) for t in self.tickers)
         initial_guess = np.array([1.0/self.num_assets] * self.num_assets)
         
-        opt_results = sco.minimize(neg_sharpe, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+        if metrica == 'SHARPE':
+            objective = lambda w: -self.calc_portfolio_perf(w)[2]
+        elif metrica == 'SORTINO':
+            objective = self.neg_sortino
+        elif metrica == 'RISK_PARITY':
+            objective = self.risk_parity_objective
+        elif metrica == 'ENTROPIA':
+            objective = self.neg_shannon_entropy
+        else:
+            raise ValueError(f"Métrica {metrica} desconhecida.")
+        
+        opt_results = sco.minimize(objective, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
         return opt_results.x
 
     def get_efficient_frontier(self, results):
@@ -211,19 +261,24 @@ class Visualizer:
         plt.close()
 
     @staticmethod
-    def plot_efficient_frontier(mc_results, opt_ret, opt_vol, frontier_vols, target_returns):
+    def plot_efficient_frontier(mc_results, opt_ret, opt_vol, frontier_vols, target_returns, metrica):
         plt.figure(figsize=(10, 6))
         plt.scatter(mc_results[1,:], mc_results[0,:], c=mc_results[2,:], cmap='viridis', marker='o', s=10, alpha=0.3)
-        plt.colorbar(label='Índice de Sharpe')
+        plt.colorbar(label=f'Métrica: {metrica}')
         
         plt.plot(frontier_vols, target_returns, 'k--', linewidth=2, label='Fronteira Eficiente (Restrita)')
-        plt.scatter(opt_vol, opt_ret, marker='*', color='red', s=500, label='Carteira Ótima (Max Sharpe)')
         
-        # Desenhando a Capital Market Line (Linha de Tangência)
-        cml_x = np.linspace(0, max(mc_results[1,:]) * 1.1, 100)
-        sharpe_ratio = (opt_ret - RISK_FREE_RATE) / opt_vol
-        cml_y = RISK_FREE_RATE + sharpe_ratio * cml_x
-        plt.plot(cml_x, cml_y, color='blue', linestyle='-', linewidth=1.5, label=f'CML (Tangência) Rf={RISK_FREE_RATE*100:.1f}%')
+        label_otima = f'Carteira Ótima ({METRICA_OTIMIZACAO})'
+        plt.scatter(opt_vol, opt_ret, marker='*', color='red', s=500, label=label_otima)
+        
+        # Desenhando a Capital Market Line (Linha de Tangência) apenas se for Sharpe
+        if METRICA_OTIMIZACAO == 'SHARPE':
+            cml_x = np.linspace(0, max(mc_results[1,:]) * 1.1, 100)
+            sharpe_ratio = (opt_ret - RISK_FREE_RATE) / opt_vol
+            cml_y = RISK_FREE_RATE + sharpe_ratio * cml_x
+            plt.plot(cml_x, cml_y, color='blue', linestyle='-', linewidth=1.5, label=f'CML (Tangência) Rf={RISK_FREE_RATE*100:.1f}%')
+            plt.xlim(left=0)  # Garante que o eixo X comece em 0 para vermos a interceptação da Taxa Livre de Risco
+
         
         plt.title('Fronteira Eficiente: Risco x Retorno', color='#001F3F')
         plt.xlabel('Risco Anualizado (Volatilidade)')
@@ -310,12 +365,12 @@ class ReportGenerator:
         self.elements.append(table)
         self.elements.append(Spacer(1, 15))
 
-    def generate(self, tickers, stats, opt_weights, eq_weights):
+    def generate(self, tickers, stats, opt_weights, eq_weights, metrica):
         print("Gerando Relatório PDF...")
         self.add_title("Relatório de Otimização de Portfólio")
         
         # Introdução
-        self.add_text("Este relatório apresenta a análise quantitativa e a otimização de uma carteira de investimentos utilizando a Moderna Teoria do Portfólio de Markowitz. O objetivo primário é encontrar a alocação que maximiza o Índice de Sharpe, respeitando limites máximos de exposição por ativo.")
+        self.add_text(f"Este relatório apresenta a análise quantitativa e a otimização de uma carteira de investimentos utilizando a Moderna Teoria do Portfólio de Markowitz. O objetivo primário é encontrar a alocação baseada na métrica escolhida: {metrica}, respeitando limites máximos de exposição por ativo.")
         
         # Etapa de Dados e Estatísticas
         self.add_section("1. Captação de Dados e Motor Estatístico")
@@ -342,16 +397,16 @@ class ReportGenerator:
         
         # Etapa Otimização
         self.add_section("2. Abordagem Híbrida de Otimização")
-        self.add_text("Foram realizadas iterações via Simulação de Monte Carlo para explorar o espaço amostral, seguidas de uma otimização com Solver Numérico (Scipy) para identificar matematicamente o ponto ótimo da Fronteira Eficiente (Máximo Sharpe).")
+        self.add_text(f"Foram realizadas iterações via Simulação de Monte Carlo para explorar o espaço amostral, seguidas de uma otimização com Solver Numérico (Scipy) focada na métrica: {metrica}.")
         
         self.add_image('grafico3_fronteira.png', width=450, height=300)
         self.add_image('grafico4_pizza.png', width=300, height=300)
         
         # Tabela Final
         self.add_section("3. Resultados Finais: Rebalanceamento")
-        self.add_text("Comparação entre uma carteira equiponderada e a carteira ótima gerada pelo Solver numérico.")
+        self.add_text(f"Comparação entre uma carteira equiponderada e a carteira ótima gerada pelo Solver numérico (Métrica: {metrica}).")
         
-        final_table = [["Ativo", "Peso Máximo Restrito", "Carteira Equiponderada", "Carteira Max Sharpe (Ótima)"]]
+        final_table = [["Ativo", "Peso Máximo Restrito", "Carteira Equiponderada", f"Carteira Ótima ({metrica})"]]
         for i, t in enumerate(tickers):
             max_w = f"{PESOS_MAXIMOS.get(t, 1.0)*100:.1f}%"
             eq_w = f"{eq_weights[i]*100:.1f}%"
@@ -394,10 +449,10 @@ def main():
 
     
     # 3. Optimize
-    optimizer = Optimizer(tickers_fetched, stats.mean_returns, stats.cov_matrix, PESOS_MAXIMOS)
-    mc_results, mc_weights = optimizer.run_monte_carlo(NUM_PORTFOLIOS)
+    optimizer = Optimizer(tickers_fetched, stats.mean_returns, stats.cov_matrix, PESOS_MAXIMOS, stats.log_returns)
+    mc_results, mc_weights = optimizer.run_monte_carlo(NUM_PORTFOLIOS, metrica=METRICA_OTIMIZACAO)
     
-    opt_weights = optimizer.run_scipy_solver()
+    opt_weights = optimizer.run_scipy_solver(metrica=METRICA_OTIMIZACAO)
     opt_ret, opt_vol, opt_sharpe = optimizer.calc_portfolio_perf(opt_weights)
     
     frontier_x, frontier_y = optimizer.get_efficient_frontier(mc_results)
@@ -407,13 +462,13 @@ def main():
     viz = Visualizer()
     viz.plot_normalized_history(data)
     viz.plot_correlation(stats.log_returns)
-    viz.plot_efficient_frontier(mc_results, opt_ret, opt_vol, frontier_y, frontier_x)
+    viz.plot_efficient_frontier(mc_results, opt_ret, opt_vol, frontier_y, frontier_x, METRICA_OTIMIZACAO)
     viz.plot_pie_weights(tickers_fetched, opt_weights)
     
     # 5. Report
     eq_weights = np.array([1.0/len(tickers_fetched)] * len(tickers_fetched))
     report = ReportGenerator()
-    report.generate(tickers_fetched, stats, opt_weights, eq_weights)
+    report.generate(tickers_fetched, stats, opt_weights, eq_weights, METRICA_OTIMIZACAO)
     
 if __name__ == "__main__":
     main()

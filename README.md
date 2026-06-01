@@ -26,11 +26,13 @@ PESOS_MAXIMOS = {
     'DIVO11.SA': 0.40,
     # ...
 }
+METRICA_OTIMIZACAO = 'SHARPE'
 RISK_FREE_RATE = 0.105  # Representando a Selic a 10.5%
 ```
 - **TICKERS_YFINANCE**: Lista com o código dos ativos de interesse (ativos brasileiros costumam levar o sufixo `.SA`).
 - **PESOS_MAXIMOS**: Restrição máxima (teto) de alocação que o algoritmo é permitido destinar a um ativo (ex: `0.40` significa que a carteira ótima não poderá ter mais do que 40% neste ativo, impedindo concentração excessiva de risco).
-- **RISK_FREE_RATE**: Taxa Livre de Risco (Rf) usada para descontar o Índice de Sharpe e desenhar a *Capital Market Line*.
+- **METRICA_OTIMIZACAO**: Você pode mudar o comportamento do motor matemático alterando a métrica para `'SHARPE'` (maximiza retorno vs risco), `'SORTINO'` (foca em minimizar o risco de perdas/downside), `'RISK_PARITY'` (minimiza a discrepância da contribuição de risco entre ativos) ou `'ENTROPIA'` (força a diversificação matemática da carteira através da Entropia de Shannon).
+- **RISK_FREE_RATE**: Taxa Livre de Risco (Rf) usada para descontar o Índice de Sharpe/Sortino e desenhar a *Capital Market Line*.
 
 ---
 
