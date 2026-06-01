@@ -1,0 +1,12 @@
+# Python environments
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Arquivos gerados pelo script
+*.pdf
+*.png
+
+# Arquivos de sistema
+.DS_Store
