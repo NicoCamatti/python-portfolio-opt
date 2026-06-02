@@ -7,6 +7,7 @@ No final do processo, um **relatório completo e formatado em PDF** é gerado co
 ## 🚀 Funcionalidades
 
 - **Captação Automática de Dados**: Integração com o Yahoo Finance (via `yfinance`) buscando todo o histórico de preços de fechamento dos ativos selecionados na B3 ou bolsas globais.
+- **Conversão Cambial Integrada**: O sistema suporta ativos cotados diretamente em dólar (ex: ETFs americanos). Ele detecta a presença desses ativos, baixa a cotação histórica do câmbio (`USDBRL=X`), alinha os feriados e multiplica dinamicamente os preços em dólar para refletirem a variação cambial do investidor brasileiro (em BRL). Ativos convertidos são marcados com um `*` nos gráficos e relatórios.
 - **Tratamento de Dados e Limpeza**: Identifica automaticamente ativos sem dados suficientes (removendo as colunas com anomalias de formatação antes do Solver) e emite alertas para ativos com histórico inferior a 5 anos.
 - **Motor Estatístico**: Calcula o log-retorno diário, médias anualizadas e a matriz de covariância.
 - **Otimização Híbrida**:
@@ -21,15 +22,19 @@ O arquivo principal é o `portfolio_optimizer.py`.
 
 No topo do arquivo, você encontrará as variáveis de configuração que podem ser modificadas livremente:
 ```python
-TICKERS_YFINANCE = ['DIVO11.SA', 'IVVB11.SA', 'GOLD11.SA', 'BITH11.SA', 'B5P211.SA']
+TICKERS_YFINANCE_BRL = ['DIVO11.SA']
+TICKERS_YFINANCE_USD = ['VT', 'IAU', 'BTC-USD', 'BIL']
+
 PESOS_MAXIMOS = {
-    'DIVO11.SA': 0.40,
+    'DIVO11.SA': 1.0,
+    'VT': 1.0,
     # ...
 }
 METRICA_OTIMIZACAO = 'SHARPE'
 RISK_FREE_RATE = 0.105  # Representando a Selic a 10.5%
 ```
-- **TICKERS_YFINANCE**: Lista com o código dos ativos de interesse (ativos brasileiros costumam levar o sufixo `.SA`).
+- **TICKERS_YFINANCE_BRL**: Lista com o código dos ativos de interesse listados no Brasil, já em moeda local (ativos brasileiros costumam levar o sufixo `.SA`).
+- **TICKERS_YFINANCE_USD**: Lista com o código dos ativos americanos ou criptos (cotados em Dólar). O script fará a conversão histórica destes automaticamente para Real.
 - **PESOS_MAXIMOS**: Restrição máxima (teto) de alocação que o algoritmo é permitido destinar a um ativo (ex: `0.40` significa que a carteira ótima não poderá ter mais do que 40% neste ativo, impedindo concentração excessiva de risco).
 - **METRICA_OTIMIZACAO**: Você pode mudar o comportamento do motor matemático alterando a métrica para `'SHARPE'` (maximiza retorno vs risco), `'SORTINO'` (foca em minimizar o risco de perdas/downside), `'RISK_PARITY'` (minimiza a discrepância da contribuição de risco entre ativos) ou `'ENTROPIA'` (força a diversificação matemática da carteira através da Entropia de Shannon).
 - **RISK_FREE_RATE**: Taxa Livre de Risco (Rf) usada para descontar o Índice de Sharpe/Sortino e desenhar a *Capital Market Line*.

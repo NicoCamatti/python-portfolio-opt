@@ -17,16 +17,19 @@ warnings.filterwarnings('ignore')
 # ==========================================
 # 1. PARAMETRIZAÇÃO E INPUTS DE ENTRADA
 # ==========================================
-TICKERS_YFINANCE = ['DIVO11.SA', 'WRLD11.SA', 'GOLD11.SA', 'BITH11.SA']
+TICKERS_YFINANCE_BRL = ['DIVO11.SA']
+TICKERS_YFINANCE_USD = ['VT', 'IAU', 'BTC-USD', 'BIL']
+
 PESOS_MAXIMOS = {
-    'DIVO11.SA': 0.40,
-    'WRLD11.SA': 0.40,
-    'GOLD11.SA': 0.40,
-    'BITH11.SA': 0.40
+    'DIVO11.SA': 1.0,
+    'VT': 1.0,
+    'IAU': 1.0,
+    'BTC-USD': 1.0,
+    'BIL': 1.0
 }
 
 # Métrica de Otimização Escolhida. Opções: 'SHARPE', 'SORTINO', 'RISK_PARITY', 'ENTROPIA'
-METRICA_OTIMIZACAO = 'RISK_PARITY'
+METRICA_OTIMIZACAO = 'SHARPE'
 
 RISK_FREE_RATE = 0.105  # Selic reference 10.5%
 NUM_PORTFOLIOS = 20000
@@ -40,14 +43,30 @@ WARNING_RED = colors.HexColor('#FF4136')
 # 2. CAPTAÇÃO DE DADOS
 # ==========================================
 class DataFetcher:
-    def __init__(self, tickers):
-        self.tickers = tickers
+    def __init__(self, tickers_brl, tickers_usd):
+        self.tickers_brl = tickers_brl
+        self.tickers_usd = tickers_usd
         
     def fetch_data(self):
         print("Baixando dados do Yahoo Finance...")
-        data = yf.download(self.tickers, period="max")['Close']
+        all_tickers = self.tickers_brl + self.tickers_usd
+        if self.tickers_usd:
+            all_tickers.append('USDBRL=X')
+            
+        data = yf.download(all_tickers, period="max")['Close']
         if isinstance(data, pd.Series):
             data = data.to_frame()
+            
+        if self.tickers_usd and 'USDBRL=X' in data.columns:
+            fx_rate = data['USDBRL=X'].ffill()  # Tratar faltas de cotação de câmbio
+            for us_t in self.tickers_usd:
+                if us_t in data.columns:
+                    data[us_t] = data[us_t] * fx_rate
+            data = data.drop(columns=['USDBRL=X'])
+            
+        # Adiciona '*' aos ativos dolarizados
+        rename_dict = {t: f"{t}*" for t in self.tickers_usd}
+        data = data.rename(columns=rename_dict)
         return data
 
 # ==========================================
@@ -365,7 +384,7 @@ class ReportGenerator:
         self.elements.append(table)
         self.elements.append(Spacer(1, 15))
 
-    def generate(self, tickers, stats, opt_weights, eq_weights, metrica):
+    def generate(self, tickers, stats, opt_weights, eq_weights, metrica, max_weights):
         print("Gerando Relatório PDF...")
         self.add_title("Relatório de Otimização de Portfólio")
         
@@ -408,7 +427,7 @@ class ReportGenerator:
         
         final_table = [["Ativo", "Peso Máximo Restrito", "Carteira Equiponderada", f"Carteira Ótima ({metrica})"]]
         for i, t in enumerate(tickers):
-            max_w = f"{PESOS_MAXIMOS.get(t, 1.0)*100:.1f}%"
+            max_w = f"{max_weights.get(t, 1.0)*100:.1f}%"
             eq_w = f"{eq_weights[i]*100:.1f}%"
             opt_w = f"{opt_weights[i]*100:.2f}%"
             final_table.append([t, max_w, eq_w, opt_w])
@@ -422,10 +441,16 @@ class ReportGenerator:
 # 7. EXECUÇÃO PRINCIPAL
 # ==========================================
 def main():
-    tickers_to_fetch = [t for t in TICKERS_YFINANCE if t != 'TESOURO_IPCA']
-    
+    # Preparar dicionário de pesos máximos para suportar o sufixo '*'
+    max_weights = {}
+    for k, v in PESOS_MAXIMOS.items():
+        if k in TICKERS_YFINANCE_USD:
+            max_weights[f"{k}*"] = v
+        else:
+            max_weights[k] = v
+
     # 1. Fetch Data
-    fetcher = DataFetcher(tickers_to_fetch)
+    fetcher = DataFetcher(TICKERS_YFINANCE_BRL, TICKERS_YFINANCE_USD)
     data = fetcher.fetch_data()
     
     # Check if data was fetched
@@ -449,7 +474,7 @@ def main():
 
     
     # 3. Optimize
-    optimizer = Optimizer(tickers_fetched, stats.mean_returns, stats.cov_matrix, PESOS_MAXIMOS, stats.log_returns)
+    optimizer = Optimizer(tickers_fetched, stats.mean_returns, stats.cov_matrix, max_weights, stats.log_returns)
     mc_results, mc_weights = optimizer.run_monte_carlo(NUM_PORTFOLIOS, metrica=METRICA_OTIMIZACAO)
     
     opt_weights = optimizer.run_scipy_solver(metrica=METRICA_OTIMIZACAO)
@@ -468,7 +493,7 @@ def main():
     # 5. Report
     eq_weights = np.array([1.0/len(tickers_fetched)] * len(tickers_fetched))
     report = ReportGenerator()
-    report.generate(tickers_fetched, stats, opt_weights, eq_weights, METRICA_OTIMIZACAO)
+    report.generate(tickers_fetched, stats, opt_weights, eq_weights, METRICA_OTIMIZACAO, max_weights)
     
 if __name__ == "__main__":
     main()
